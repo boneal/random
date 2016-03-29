@@ -1,0 +1,185 @@
+#!/usr/bin/python26
+# coding: UTF-8
+#
+## @package _orc_motd
+#
+# Displays cluster information from Outbrain Orchestrator.
+#
+# Usage: Place in /etc/profiles.d
+#
+# @author Bryan O'Neal
+# @since 03/25/2016
+# @see https://github.com/outbrain/orchestrator
+# @see
+
+"""
+This script is used to augment the MOTD on a server with basic cluster information gained from Outbrain Orchestrator api. Simply create a puppet template to replace the Connection variables at the bottom of the script with ones that work for your environment and place the script in profiles.d. If your system is set up with http access for the readonly user then you should only need to replace the CLUSTERENV and CLUSTERENV variables. 
+Also, I converted this from the bash script I had to pull the same data and do the same thing so it is not as python-ish as it probably could be. That and that this is the only python I have written in about 8 months and is really being shared here for the benefit of one other person. Thus if you should stumble across it I wish you well and please let me know how you would like it improved :)
+A single script with a more compact display for many instance running on the same server sharing the same structure may be the next improvement. We will see how unwieldy this is. 
+"""
+
+import json
+import urllib2
+import base64
+import socket
+import datetime
+
+class MOTD_Mysql_Instance(object):
+    def __init__(self, hostname, port, read_only, replication_depth, master_host=None, master_port=None, \
+        seconds_behind_master=None, slave_hosts=None, last_seen=None, is_down=None, slave_sql_running=None, \
+        slave_io_running=None, version=None, data_center=None, binlog_format=None, uptime=None, notes=None ):
+        for k,v in locals().items():
+            if k != 'self' and k != last_seen:
+                setattr(self,k,v)
+        if not last_seen == None:
+            try:
+                self.last_seen = datetime.datetime.strptime(last_seen, '%Y-%m-%d %H:%M:%S')
+            except ValueError as E:
+                print "The value of last_seen: {0}, does not fit in the format of Y-M-D H:M:S or otherwise can not be converted using datetime.strptime".format(last_seen)
+                raise E
+
+
+        self.created = datetime.datetime.now()
+        self.indentchar = INDENTCHAR #global INDENTCHAR
+        self.indent = " " * len(self.indentchar)
+        if not self.replication_depth == None:
+            if self.replication_depth == 0:
+                self.myindent = ""
+            else:
+                self.myindent = self.indent * self.replication_depth + self.indentchar
+            if self.hostname == HN: #gloabl HN
+                self.displayname = "{0}{1}:{2} {3}".format(self.myindent, self.hostname, self.port, YOUAREHERE) #global YOUAREHERE
+            else:
+                self.displayname = "{0}{1}:{2} ".format(self.myindent, self.hostname, self.port)
+        else:
+            self.displayname = "{0}:{1}".format(self.hostname, self.port)
+        self.displayerrors = []
+        if self.is_down:
+            self.displayerrors.append("Server is down.")
+        else:
+            if not last_seen == None:
+                try:
+                    self.last_seen_seconds = (self.created-self.last_seen).seconds
+                except Exception as E:
+                    print "Unable to calculate the differance between now and last seen for server {0} \n    created = {1} \n    last_seen = {2}".format(self.hostname,self.created,self.last_seen)
+                    raise E
+                if self.last_seen_seconds > LAST_SEEN_SECONDS_THRESHOLD: #global LAST_SEEN_SECONDS_THRESHOLD
+                    self.displayerrors.append("Server has not been seen for {0} seconds ".format(self.last_seen_seconds))
+            if not self.binlog_format == 'MIXED' and "-h0" not in self.hostname :
+                self.displayerrors.append("Binlog format set to {0} ".format(self.binlog_format))
+            if self.replication_depth > 0 and self.read_only == 'Off':
+                self.displayerrors.append("read_only is set to Off ")
+                if self.seconds_behind_master > SECONDS_BEHIND_MASTER_THRESHOLD: #global SECONDS_BEHIND_MASTER_THRESHOLD
+                    self.displayerrors.append("Server is {0} seconds behind master ".format(self.seconds_behind_master))
+                if self.slave_sql_running == false or self.slave_io_running == false:
+                    self.displayerrors.append("Slave is not running: IO_running = {0} and SQL_running = {1} ".format(self.slave_io_running, self.slave_sql_running))
+
+    def __cmp__(self, other):
+        #Sort by replication depth then name decending
+        if self.replication_depth < other.replication_depth:
+            return -1
+        elif self.replication_depth > other.replication_depth:
+            return 1
+        elif self.replication_depth == other.replication_depth:
+                if self.hostname < other.hostname:
+                    return -1
+                elif self.hostname > other.hostname:
+                    return 1
+                if self.hostname == other.hostname:
+                    if self.port < other.port:
+                        return -1
+                    elif self.port > other.port:
+                        return 1
+                    if self.port == other.port:
+                        return 0
+
+
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+
+
+#Connection variables
+USER = "readonly"
+PASS = ""
+CLUSTERENV = "<% cluster_env %>"
+APIENDPOINT = "<% orc_server %>"
+APIURL = "http://" + APIENDPOINT + "/api/cluster/alias/" + CLUSTERENV
+HN = socket.gethostname()
+
+#Formatting variables
+INDENTCHAR = "|--> "
+INDENT = ""
+YOUAREHERE = "     <-- (You are here)"
+
+#Warnning thresholds
+SECONDS_BEHIND_MASTER_THRESHOLD = 5
+LAST_SEEN_SECONDS_THRESHOLD = 600
+
+
+CLUSTERDATA = {}
+INSTANCES = [] #List, not dictionary, of motd_mysql_instance
+
+#Prep request URL with some user data
+request = urllib2.Request(APIURL)
+base64string = base64.encodestring('readonly:').replace('\n', '')
+request.add_header("Authorization", "Basic {0}".format(base64string))
+
+# Get the data
+#CLUSTERDATA_JSON = json.load(urllib2.urlopen(request))
+try:
+   CLUSTERDATA =  json.loads((urllib2.urlopen(request, timeout=5)).read()) #Dictionary format
+except urllib2.HTTPError:
+   print "OBO Data not available. Map could not be printed"
+
+#Clear variables no longer required
+del base64string
+del request
+
+#Assign the master
+
+#TODO Replace with Key.Hostname where MasterKey.Hostname == "" and ReplicationDepth == 0 check in the class
+MASTER = CLUSTERDATA[0]['MasterKey']['Hostname']
+MASTER_PORT = CLUSTERDATA[0]['MasterKey']['Port']
+
+#import pprint
+#pp = pprint.PrettyPrinter(indent=4)
+#pp.pprint(CLUSTERDATA)
+
+def create_motd_mysql_instances():
+    print "{0}Map for {1}{2}".format(bcolors.BOLD, CLUSTERENV, bcolors.ENDC)
+    for item in CLUSTERDATA:
+        try:
+            INSTANCES.append(MOTD_Mysql_Instance(item.get('Key',{}).get('Hostname'), \
+            item.get('Key',{}).get('Port'), item.get('ReadOnly'), item.get('ReplicationDepth'), \
+            item.get('MasterKey',{}).get('Hostname'), item.get('MasterKey',{}).get('Port'), \
+            item.get('SecondsBehindMaster',{}).get('Int64'), item.get('SlaveHosts'), item.get('LastSeenTimestamp'), \
+            item.get('IsDowntimed'), item.get('Slave_SQL_Running'), item.get('Slave_IO_Running'), \
+            item.get('Version'), item.get('DataCenter'), item.get('Binlog_format'), item.get('Uptime')))
+        except Exception as E:
+            print "Failed to create MOTD_Mysql_Instance or add it to the INSTANCES list"
+            raise E
+
+    for item in sorted(INSTANCES):
+        if len(item.displayerrors) > 0:
+            #I love the idea of using termcolor but I don't want to pip install termcolor to do it when it is just a unicode wraper anyway
+            #print colored(item.displayname, red)
+           print "{0}{1}{2}".format(bcolors.FAIL, item.displayname, bcolors.ENDC)
+        else:
+            print item.displayname
+
+    print "" # line break
+    for item in sorted(INSTANCES):
+        if len(item.displayerrors) > 0:
+            print "{0}{1}Warning: {2}:{3} has the following issues: {4}".format(bcolors.WARNING, bcolors.BOLD, item.hostname, item.port, bcolors.ENDC)
+            for message in item.displayerrors:
+                print "    {0}".format(message)
+
+create_motd_mysql_instances()
